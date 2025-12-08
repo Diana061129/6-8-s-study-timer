@@ -5,6 +5,7 @@ import time
 import os
 import csv
 import plotly.express as px
+import plotly.graph_objects as go # 引入更底层的绘图库以实现复杂日历视图
 
 # ==========================================
 # 1. 页面配置与 iOS 风格 CSS + 精美壁纸
@@ -27,12 +28,9 @@ DEFAULT_SUBJECTS = list(IOS_COLORS.keys())[:-1]
 # 注入 CSS (壁纸 + iOS字体)
 st.markdown("""
     <style>
-    /* 引入字体 */
     @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@100;300;400;500&display=swap');
     
-    /* --- 核心：沉浸式壁纸设置 --- */
     [data-testid="stAppViewContainer"] {
-        /* 这里选用了一张明亮的图书馆/书桌图片，你可以替换成自己喜欢的 URL */
         background-image: url("https://images.unsplash.com/photo-1497633762265-9d179a990aa6?ixlib=rb-4.0.3&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D&auto=format&fit=crop&w=1920&q=80");
         background-size: cover;
         background-position: center;
@@ -40,37 +38,32 @@ st.markdown("""
         background-attachment: fixed;
     }
     
-    /* 给主内容区加一个半透明白底，保证文字清晰 */
     [data-testid="stMainBlockContainer"] {
-        background-color: rgba(255, 255, 255, 0.85); /* 85%不透明度的白色 */
+        background-color: rgba(255, 255, 255, 0.85);
         padding: 30px;
         border-radius: 20px;
         box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.1);
-        backdrop-filter: blur(8px); /* 毛玻璃效果 */
+        backdrop-filter: blur(8px);
         border: 1px solid rgba(255, 255, 255, 0.18);
         margin-top: 20px;
         margin-bottom: 20px;
     }
 
-    /* 全局字体设置 */
     html, body, [class*="css"] {
         font-family: 'Roboto', -apple-system, BlinkMacSystemFont, sans-serif;
-        background: transparent; /* 让背景透出来 */
+        background: transparent;
     }
     
-    /* 计时器大数字 */
     .timer-text {
         font-family: 'Roboto', sans-serif; font-weight: 100; font-size: 90px;
         color: #333; text-align: center; line-height: 1; margin-top: 20px;
         text-shadow: 0 2px 10px rgba(0,0,0,0.1);
     }
-    /* 科目胶囊 */
     .subject-badge {
         background-color: #f2f2f7; color: #8e8e93; padding: 5px 15px;
         border-radius: 20px; font-size: 14px; text-align: center;
         margin-bottom: 10px; display: inline-block;
     }
-    /* 按钮美化 */
     .stButton>button {
         border-radius: 12px; height: 50px; font-weight: 500; border: none;
         transition: transform 0.1s;
@@ -205,19 +198,19 @@ if page == "专注计时":
             st.toast(f"已记录: {duration:.1f} 分钟"); time.sleep(1); st.rerun()
         time.sleep(1); st.rerun()
 
-# --- PAGE 2: 数据日历 (已恢复记录管理功能) ---
+# --- PAGE 2: 数据日历 ---
 elif page == "数据日历":
     st.title("📊 学习日历")
     
-    # 使用 Tabs 分离视图和管理功能
     tab_viz, tab_manage = st.tabs(["📅 可视化报表", "🛠️ 记录管理 (补录/修改)"])
     
-    # === Tab 1: 可视化 ===
+    # === Tab 1: 可视化 (核心修改区域) ===
     with tab_viz:
         if df.empty:
             st.info("暂无数据，快去开始你的第一次专注吧！")
         else:
-            df['Date'] = pd.to_datetime(df['Date'])
+            # 数据预处理
+            df['Date_Obj'] = pd.to_datetime(df['Date'])
             if 'Start_Time' in df.columns:
                 df['Start_Full'] = pd.to_datetime(df['Date'].astype(str) + ' ' + df['Start_Time'])
                 df['End_Full'] = pd.to_datetime(df['Date'].astype(str) + ' ' + df['End_Time'])
@@ -229,20 +222,79 @@ elif page == "数据日历":
             fig_pie.update_layout(showlegend=False, margin=dict(t=0, b=0, l=0, r=0))
             st.plotly_chart(fig_pie, use_container_width=True)
 
-            st.subheader("时间轴视图")
+            st.subheader("时间轴视图 (近7天)")
+            
+            # 1. 数据筛选与准备
             end = datetime.datetime.now().date()
-            start = end - datetime.timedelta(days=7)
-            mask = (df['Date'].dt.date >= start) & (df['Date'].dt.date <= end)
+            start = end - datetime.timedelta(days=6) # 显示一周
+            mask = (df['Date_Obj'].dt.date >= start) & (df['Date_Obj'].dt.date <= end)
             rec_df = df.loc[mask].copy()
             
             if not rec_df.empty and 'Start_Full' in rec_df.columns:
-                rec_df = rec_df.sort_values('Date', ascending=False)
-                fig_gantt = px.timeline(rec_df, x_start="Start_Full", x_end="End_Full", y="Date", color="Subject", color_discrete_map=IOS_COLORS, height=400)
-                fig_gantt.update_layout(xaxis_title="", yaxis_title="", plot_bgcolor='white', showlegend=True, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
-                fig_gantt.update_yaxes(categoryorder='category descending', showgrid=False)
-                st.plotly_chart(fig_gantt, use_container_width=True)
+                # 关键步骤：计算距离午夜的分钟数，作为Y轴定位
+                rec_df['Start_Minute'] = rec_df['Start_Full'].dt.hour * 60 + rec_df['Start_Full'].dt.minute
+                # 格式化日期显示
+                rec_df['Date_Str'] = rec_df['Date_Obj'].dt.strftime('%m-%d %a')
+                
+                # 2. 使用 Graph Objects 构建自定义图表
+                fig = go.Figure()
 
-    # === Tab 2: 记录管理 (已找回) ===
+                # 为每个科目添加一个柱状图层 (Bar Trace)
+                for subject in rec_df['Subject'].unique():
+                    subject_data = rec_df[rec_df['Subject'] == subject]
+                    color = IOS_COLORS.get(subject, "#8E8E93")
+                    
+                    fig.add_trace(go.Bar(
+                        x=subject_data['Date_Str'], # X轴：日期
+                        y=subject_data['Duration_Minutes'], # Y轴高度：持续时长
+                        base=subject_data['Start_Minute'], # Y轴起始位置：开始时间(分钟)
+                        name=subject,
+                        marker_color=color,
+                        hoverinfo="x+y+name",
+                        hovertemplate=
+                        "<b>%{x}</b><br>" +
+                        "科目: %{data.name}<br>" +
+                        "时长: %{y} 分钟<br>" +
+                        "<extra></extra>" # 隐藏额外的trace信息
+                    ))
+
+                # 3. 配置 Y 轴刻度 (显示为 HH:MM 格式)
+                tick_vals = list(range(0, 24 * 60 + 1, 60)) # 每小时一个刻度 (0, 60, 120...)
+                tick_text = [f"{h:02d}:00" for h in range(25)] # 对应文本 (00:00, 01:00...)
+
+                # 4. 配置整体布局，模仿 iOS 日历
+                fig.update_layout(
+                    barmode='stack', # 虽然是stack，但配合base使用变成了悬浮条形图
+                    yaxis=dict(
+                        title="",
+                        range=[24*60, 0], # 关键：倒序显示，0点在最上面，24点在最下面
+                        tickmode='array',
+                        tickvals=tick_vals,
+                        ticktext=tick_text,
+                        showgrid=True,
+                        gridcolor='#f0f0f0',
+                        zeroline=False
+                    ),
+                    xaxis=dict(
+                        title="",
+                        type='category', # 保证日期按顺序排列
+                        categoryorder='array',
+                        categoryarray=sorted(rec_df['Date_Str'].unique()),
+                        showgrid=False
+                    ),
+                    plot_bgcolor='white',
+                    paper_bgcolor='white',
+                    height=600, # 增加高度让时间轴更清晰
+                    showlegend=True,
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                    margin=dict(l=60, r=20, t=40, b=40) # 调整边距以显示完整的Y轴标签
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                 st.info("近7天无详细记录")
+
+    # === Tab 2: 记录管理 ===
     with tab_manage:
         st.subheader("✍️ 手动补录")
         with st.form("manual_add"):
@@ -267,7 +319,7 @@ elif page == "数据日历":
         if df.empty: st.info("暂无数据可编辑")
         else:
             st.caption("提示：直接双击单元格修改，勾选行左侧并按 Delete 键删除。完成后务必点击下方保存按钮。")
-            edited_df = st.data_editor(df, num_rows="dynamic", use_container_width=True, key="editor_v5")
+            edited_df = st.data_editor(df, num_rows="dynamic", use_container_width=True, key="editor_v6")
             if st.button("💾 保存所有变动", type="primary"):
                 edited_df.to_csv(DATA_FILE, index=False); st.success("已保存！"); time.sleep(1); st.rerun()
 
