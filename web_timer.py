@@ -5,10 +5,11 @@ import time
 import os
 import csv
 import plotly.express as px
-import plotly.graph_objects as go # 引入更底层的绘图库以实现复杂日历视图
+import plotly.graph_objects as go
+import pytz  # 引入时区库
 
 # ==========================================
-# 1. 页面配置与 iOS 风格 CSS + 精美壁纸
+# 1. 页面配置与 iOS 风格 CSS
 # ==========================================
 st.set_page_config(page_title="iStudy OS", page_icon="🍎", layout="centered")
 
@@ -16,6 +17,8 @@ st.set_page_config(page_title="iStudy OS", page_icon="🍎", layout="centered")
 DATA_FILE = "study_log.csv"
 SUBJECT_FILE = "subjects.txt"
 POMODORO_MINUTES = 25
+# 定义中国时区
+CN_TZ = pytz.timezone('Asia/Shanghai')
 
 # 定义 iOS 风格配色
 IOS_COLORS = {
@@ -39,7 +42,7 @@ st.markdown("""
     }
     
     [data-testid="stMainBlockContainer"] {
-        background-color: rgba(255, 255, 255, 0.85);
+        background-color: rgba(255, 255, 255, 0.90); /* 稍微加深一点不透明度 */
         padding: 30px;
         border-radius: 20px;
         box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.1);
@@ -73,8 +76,12 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. 辅助函数
+# 2. 辅助函数 (已加入时区处理)
 # ==========================================
+def get_current_time():
+    """获取当前的中国时间"""
+    return datetime.datetime.now(CN_TZ)
+
 def init_files():
     if not os.path.exists(DATA_FILE):
         with open(DATA_FILE, 'w', newline='', encoding='utf-8') as f:
@@ -104,13 +111,20 @@ def add_new_subject(new_sub):
     return False
 
 def save_record(subject, duration, start_dt, end_dt=None):
-    if end_dt is None: end_dt = datetime.datetime.now()
+    # 确保 start_dt 是有时区信息的，或者将其视为中国时间
+    if end_dt is None: 
+        end_dt = get_current_time()
+    
     if not os.path.exists(DATA_FILE): init_files()
+    
     with open(DATA_FILE, 'a', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
         writer.writerow([
-            start_dt.strftime("%Y-%m-%d"), subject, round(duration, 2),
-            start_dt.strftime("%H:%M:%S"), end_dt.strftime("%H:%M:%S")
+            start_dt.strftime("%Y-%m-%d"), 
+            subject, 
+            round(duration, 2),
+            start_dt.strftime("%H:%M:%S"), 
+            end_dt.strftime("%H:%M:%S")
         ])
 
 # ==========================================
@@ -134,8 +148,10 @@ if os.path.exists(DATA_FILE):
 
 # --- PAGE 1: 专注计时 ---
 if page == "专注计时":
+    # 顶部时间：显示当前的中国时间
+    current_cn_time = get_current_time()
     col1, col2 = st.columns([3, 1])
-    with col1: st.markdown(f"### {datetime.datetime.now().strftime('%A, %B %d')}")
+    with col1: st.markdown(f"### {current_cn_time.strftime('%A, %B %d')}")
     with col2:
         total_hrs = df['Duration_Minutes'].sum()/60 if not df.empty else 0.0
         st.caption(f"本周累计: {total_hrs:.1f}h")
@@ -151,7 +167,8 @@ if page == "专注计时":
             st.write(""); st.write("")
             if st.button("开始专注", use_container_width=True, type="primary"):
                 st.session_state.is_running = True
-                st.session_state.start_time = datetime.datetime.now()
+                # 关键：记录开始时间时，使用中国时间
+                st.session_state.start_time = get_current_time()
                 st.session_state.selected_subject = subject
                 st.rerun()
             with st.expander("自定义学科"):
@@ -160,7 +177,8 @@ if page == "专注计时":
                     add_new_subject(new_sub)
                     st.rerun()
     else:
-        now = datetime.datetime.now()
+        # 计时逻辑：使用当前中国时间 - 开始的中国时间
+        now = get_current_time()
         start = st.session_state.start_time
         elapsed_seconds = int((now - start).total_seconds())
         is_pomodoro = "番茄" in st.session_state.timer_mode
@@ -204,92 +222,76 @@ elif page == "数据日历":
     
     tab_viz, tab_manage = st.tabs(["📅 可视化报表", "🛠️ 记录管理 (补录/修改)"])
     
-    # === Tab 1: 可视化 (核心修改区域) ===
+    # === Tab 1: 可视化 ===
     with tab_viz:
         if df.empty:
             st.info("暂无数据，快去开始你的第一次专注吧！")
         else:
-            # 数据预处理
             df['Date_Obj'] = pd.to_datetime(df['Date'])
             if 'Start_Time' in df.columns:
                 df['Start_Full'] = pd.to_datetime(df['Date'].astype(str) + ' ' + df['Start_Time'])
                 df['End_Full'] = pd.to_datetime(df['Date'].astype(str) + ' ' + df['End_Time'])
             
+            # --- 1. 投入分布 (修正饼图显示) ---
             st.subheader("投入分布")
             pie_data = df.groupby('Subject')['Duration_Minutes'].sum().reset_index()
             fig_pie = px.pie(pie_data, values='Duration_Minutes', names='Subject', 
                              color='Subject', color_discrete_map=IOS_COLORS, hole=0.6)
+            
+            # 关键修改：显示 标签 + 百分比 + 具体数值
+            fig_pie.update_traces(
+                textinfo='label+percent+value', 
+                texttemplate='%{label}<br>%{percent}<br>%{value:.1f} min'
+            )
+            
             fig_pie.update_layout(showlegend=False, margin=dict(t=0, b=0, l=0, r=0))
             st.plotly_chart(fig_pie, use_container_width=True)
 
+            # --- 2. 时间轴视图 (使用自定义日历逻辑) ---
             st.subheader("时间轴视图 (近7天)")
             
-            # 1. 数据筛选与准备
-            end = datetime.datetime.now().date()
-            start = end - datetime.timedelta(days=6) # 显示一周
-            mask = (df['Date_Obj'].dt.date >= start) & (df['Date_Obj'].dt.date <= end)
+            # 使用中国时间判断日期
+            today_cn = get_current_time().date()
+            start_date = today_cn - datetime.timedelta(days=6)
+            mask = (df['Date_Obj'].dt.date >= start_date) & (df['Date_Obj'].dt.date <= today_cn)
             rec_df = df.loc[mask].copy()
             
             if not rec_df.empty and 'Start_Full' in rec_df.columns:
-                # 关键步骤：计算距离午夜的分钟数，作为Y轴定位
                 rec_df['Start_Minute'] = rec_df['Start_Full'].dt.hour * 60 + rec_df['Start_Full'].dt.minute
-                # 格式化日期显示
                 rec_df['Date_Str'] = rec_df['Date_Obj'].dt.strftime('%m-%d %a')
                 
-                # 2. 使用 Graph Objects 构建自定义图表
                 fig = go.Figure()
-
-                # 为每个科目添加一个柱状图层 (Bar Trace)
                 for subject in rec_df['Subject'].unique():
                     subject_data = rec_df[rec_df['Subject'] == subject]
                     color = IOS_COLORS.get(subject, "#8E8E93")
-                    
                     fig.add_trace(go.Bar(
-                        x=subject_data['Date_Str'], # X轴：日期
-                        y=subject_data['Duration_Minutes'], # Y轴高度：持续时长
-                        base=subject_data['Start_Minute'], # Y轴起始位置：开始时间(分钟)
+                        x=subject_data['Date_Str'],
+                        y=subject_data['Duration_Minutes'],
+                        base=subject_data['Start_Minute'],
                         name=subject,
                         marker_color=color,
                         hoverinfo="x+y+name",
-                        hovertemplate=
-                        "<b>%{x}</b><br>" +
-                        "科目: %{data.name}<br>" +
-                        "时长: %{y} 分钟<br>" +
-                        "<extra></extra>" # 隐藏额外的trace信息
+                        hovertemplate="<b>%{x}</b><br>科目: %{data.name}<br>时长: %{y} 分钟<br><extra></extra>"
                     ))
 
-                # 3. 配置 Y 轴刻度 (显示为 HH:MM 格式)
-                tick_vals = list(range(0, 24 * 60 + 1, 60)) # 每小时一个刻度 (0, 60, 120...)
-                tick_text = [f"{h:02d}:00" for h in range(25)] # 对应文本 (00:00, 01:00...)
+                tick_vals = list(range(0, 24 * 60 + 1, 60))
+                tick_text = [f"{h:02d}:00" for h in range(25)]
 
-                # 4. 配置整体布局，模仿 iOS 日历
                 fig.update_layout(
-                    barmode='stack', # 虽然是stack，但配合base使用变成了悬浮条形图
+                    barmode='stack',
                     yaxis=dict(
-                        title="",
-                        range=[24*60, 0], # 关键：倒序显示，0点在最上面，24点在最下面
-                        tickmode='array',
-                        tickvals=tick_vals,
-                        ticktext=tick_text,
-                        showgrid=True,
-                        gridcolor='#f0f0f0',
-                        zeroline=False
+                        title="", range=[24*60, 0], tickmode='array',
+                        tickvals=tick_vals, ticktext=tick_text,
+                        showgrid=True, gridcolor='#f0f0f0', zeroline=False
                     ),
                     xaxis=dict(
-                        title="",
-                        type='category', # 保证日期按顺序排列
-                        categoryorder='array',
-                        categoryarray=sorted(rec_df['Date_Str'].unique()),
-                        showgrid=False
+                        title="", type='category', categoryorder='array',
+                        categoryarray=sorted(rec_df['Date_Str'].unique()), showgrid=False
                     ),
-                    plot_bgcolor='white',
-                    paper_bgcolor='white',
-                    height=600, # 增加高度让时间轴更清晰
-                    showlegend=True,
-                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                    margin=dict(l=60, r=20, t=40, b=40) # 调整边距以显示完整的Y轴标签
+                    plot_bgcolor='white', paper_bgcolor='white', height=600,
+                    showlegend=True, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                    margin=dict(l=60, r=20, t=40, b=40)
                 )
-                
                 st.plotly_chart(fig, use_container_width=True)
             else:
                  st.info("近7天无详细记录")
@@ -300,14 +302,20 @@ elif page == "数据日历":
         with st.form("manual_add"):
             c1, c2 = st.columns(2)
             with c1:
-                add_date = st.date_input("日期", datetime.date.today())
+                # 默认日期使用中国时间
+                add_date = st.date_input("日期", get_current_time().date())
                 add_subject = st.selectbox("科目", get_subjects())
             with c2:
-                add_start = st.time_input("开始时间", datetime.time(9, 00))
-                add_end = st.time_input("结束时间", datetime.time(10, 00))
+                add_start = st.time_input("开始时间", datetime.time(20, 00)) # 默认晚上8点方便测试
+                add_end = st.time_input("结束时间", datetime.time(21, 00))
             if st.form_submit_button("确认补录"):
+                # 组合日期和时间
                 start_dt = datetime.datetime.combine(add_date, add_start)
                 end_dt = datetime.datetime.combine(add_date, add_end)
+                
+                # 手动补录通常是"墙上时间"，直接保存即可，无需再次时区转换，
+                # 因为 CSV 保存的是字符串，后续读取时也是按字符串读取。
+                
                 if end_dt <= start_dt: st.error("结束时间需晚于开始时间")
                 else:
                     dur = (end_dt - start_dt).total_seconds() / 60
@@ -318,15 +326,13 @@ elif page == "数据日历":
         st.subheader("📝 修改/删除已有记录")
         if df.empty: st.info("暂无数据可编辑")
         else:
-            st.caption("提示：直接双击单元格修改，勾选行左侧并按 Delete 键删除。完成后务必点击下方保存按钮。")
-            edited_df = st.data_editor(df, num_rows="dynamic", use_container_width=True, key="editor_v6")
+            edited_df = st.data_editor(df, num_rows="dynamic", use_container_width=True, key="editor_v7")
             if st.button("💾 保存所有变动", type="primary"):
                 edited_df.to_csv(DATA_FILE, index=False); st.success("已保存！"); time.sleep(1); st.rerun()
 
 # --- PAGE 3: 备份 ---
 elif page == "云端备份":
     st.title("☁️ 数据同步")
-    st.info("提示：请定期下载备份，以免服务器重启导致数据丢失。")
     col1, col2 = st.columns(2)
     with col1:
         if os.path.exists(DATA_FILE):
